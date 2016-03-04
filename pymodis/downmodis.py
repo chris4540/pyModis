@@ -209,6 +209,13 @@ class downModis:
        :param int timeout: Timeout value for HTTP server (seconds)
        :param bool checkgdal: variable to set the GDAL check
     """
+
+    # --------------------
+    # class attributes
+    # --------------------
+    # the maximum number to trial in each action(e.g. change the directory)
+    MAX_ACTION_TRIALS = 20
+
     def __init__(self, destinationFolder, password=None, user="anonymous",
                  url="http://e4ftl01.cr.usgs.gov", tiles=None, path="MOLT",
                  product="MOD11A1.005", today=None, enddate=None, delta=10,
@@ -244,15 +251,11 @@ class downModis:
         else:
             raise Exception("Folder to store downloaded files does not exist"
                             " or is not writeable")
-        # return the name of product
-        if len(self.path.split('/')) == 2:
-            self.product = self.path.split('/')[1]
-        elif len(self.path.split('/')) == 3:
-            self.product = self.path.split('/')[2]
+
         # write a file with the name of file to be downloaded
-        self.filelist = open(os.path.join(self.writeFilePath,
-                                          'listfile{pro}.txt'.format(pro=self.product)),
-                                          'w')
+        self.filelist = \
+            open(os.path.join(self.writeFilePath,
+                              'listfile{pro}.txt'.format(pro=self.product)), 'w')
         # set if to download jpgs
         self.jpeg = jpg
         # today, or the last day in the download series chronologically
@@ -319,21 +322,22 @@ class downModis:
                             server before failing. If ncon < 0, connection
                             attempts are unlimited in number
         """
-        self.nconnection += 1
-        try:
+
+        while(self.nconnection <= ncon or ncon < 0):
+            self.nconnection += 1
             try:
-                http = requests.get(urljoin(self.url, self.path),
-                                    timeout=self.timeout)
-                self.dirData = modisHtmlParser(http.content).get_dates()
+                try:
+                    http = requests.get(urljoin(self.url, self.path),
+                                        timeout=self.timeout)
+                    self.dirData = modisHtmlParser(http.content).get_dates()
+                except:
+                    http = urllib2.urlopen(urljoin(self.url, self.path),
+                                           timeout=self.timeout)
+                    self.dirData = modisHtmlParser(http.read()).get_dates()
+                self.dirData.reverse()
+                break  # break the trial loop when everything is fine.
             except:
-                http = urllib2.urlopen(urljoin(self.url, self.path),
-                                       timeout=self.timeout)
-                self.dirData = modisHtmlParser(http.read()).get_dates()
-            self.dirData.reverse()
-        except:
-            logging.error('Error in connection')
-            if self.nconnection <= ncon or ncon < 0:
-                self._connectHTTP()
+                logging.error('Error in connection')
 
     def _connectFTP(self, ncon=20):
         """Set connection to ftp server, move to path where data are stored,
@@ -343,26 +347,26 @@ class downModis:
                             server before failing.
 
         """
-        self.nconnection += 1
-        try:
-            # connect to ftp server
-            self.ftp = FTP(self.url)
-            self.ftp.login(self.user, self.password)
-            # enter in directory
-            self.ftp.cwd(self.path)
-            self.dirData = []
-            # return data inside directory
-            self.ftp.dir(self.dirData.append)
-            # reverse order of data for have first the nearest to today
-            self.dirData.reverse()
-            # ensure dirData contains only directories, remove all references to files
-            self.dirData = [elem.split()[-1] for elem in self.dirData if elem.startswith("d")]
-            if self.debug:
-                logging.debug("Open connection {url}".format(url=self.url))
-        except (EOFError, ftplib.error_perm), e:
-            logging.error('Error in connection: {err}'.format(err=e))
-            if self.nconnection <= ncon:
-                self._connectFTP()
+        while(self.nconnection <= ncon):
+            self.nconnection += 1
+            try:
+                # connect to ftp server
+                self.ftp = FTP(self.url)
+                self.ftp.login(self.user, self.password)
+                # enter in directory
+                self.ftp.cwd(self.path)
+                self.dirData = []
+                # return data inside directory
+                self.ftp.dir(self.dirData.append)
+                # reverse order of data for have first the nearest to today
+                self.dirData.reverse()
+                # ensure dirData contains only directories, remove all references to files
+                self.dirData = [elem.split()[-1] for elem in self.dirData if elem.startswith("d")]
+                if self.debug:
+                    logging.debug("Open connection {url}".format(url=self.url))
+                break  # break the trail loop when everything is fine.
+            except (EOFError, ftplib.error_perm), e:
+                logging.error('Error in connection: {err}'.format(err=e))
 
     def closeFTP(self):
         """Close ftp connection and close the file list document"""
@@ -380,20 +384,50 @@ class downModis:
 
            :param str day: a string representing a day in format YYYY.MM.DD
         """
-        try:
-            self.ftp.cwd(day)
-        except (ftplib.error_reply, socket.error), e:
-            logging.error("Error {err} entering in directory "
-                          "{name}".format(err=e, name=day))
-            self.setDirectoryIn(day)
+
+        # --------------------------------------
+        # initialize the local slope parameter.
+        # --------------------------------------
+        ntrials = 0
+
+        while(ntrials <= self.MAX_ACTION_TRIALS):
+            try:
+                self._set_dir_into(day)
+                break  # break the trial loop when everything is fine.
+            except (ftplib.error_reply, socket.error), e:
+                logging.error("Error {err} entering in directory "
+                              "{name}".format(err=e, name=day))
+            ntrials += 1
+
+        print ("success end setDirectoryIn, count = ", ntrials)
+
+    def _set_dir_into(self, day):
+        """Internal function to enter into the file directory of a specified day.
+           Recursive function call should be avoided.
+        """
+        self.ftp.cwd(day)
 
     def setDirectoryOver(self):
         """Move up within the file directory"""
-        try:
-            self.ftp.cwd('..')
-        except (ftplib.error_reply, socket.error), e:
-            logging.error("Error {err} when trying to come back".format(err=e))
-            self.setDirectoryOver()
+        # --------------------------------------
+        # initialize the local slope parameter.
+        # --------------------------------------
+        ntrials = 0
+        while(ntrials <= self.MAX_ACTION_TRIALS):
+            try:
+                self._move_to_parent_dir()
+                break  # break the trial loop when everything is fine.
+            except (ftplib.error_reply, socket.error), e:
+                logging.error("Error {err} when trying to come back".format(err=e))
+
+            ntrials += 1
+        print ("success end setDirectoryOver, count = ", ntrials)
+
+    def _move_to_parent_dir(self):
+        """Internal function to go back to parent directory.
+           Recursive function call should be avoided.
+        """
+        self.ftp.cwd("..")
 
     def _getToday(self):
         """Set the dates for the start and end of downloading"""
